@@ -1,27 +1,27 @@
 package dt.sql.alarm.core
 
-import dt.sql.alarm.conf.AlarmRuleConf
-import dt.sql.alarm.log.Logging
-import dt.sql.alarm.utils.ConfigUtils
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.SparkSession
 import dt.sql.alarm.input.SourceInfo
 import Constants._
 import dt.sql.alarm.filter.SQLFilter
-import dt.sql.alarm.msgpiper.MsgDeliver
 import dt.sql.alarm.output.SinkInfo
+import org.apache.spark.rdd.RDD
+import tech.sqlclub.common.log.Logging
+import tech.sqlclub.common.utils.ConfigUtils
 import org.apache.spark.sql.streaming.{StreamingQuery, Trigger}
+import tech.sqlclub.common.exception.SQLClubException
 
 object SparkRuntime extends Logging {
   private var sparkSession :SparkSession = null
+  var sparkConfMap:Map[String,String] = null
   var streamingQuery:StreamingQuery = null
-  lazy val msgDeliver = MsgDeliver.getInstance
 
   def getSparkSession:SparkSession = {
     if (sparkSession == null) {
       this.synchronized {
         if (sparkSession == null) {
-          logInfo("create Spark Runtime....")
+          WowLog.logInfo("create Spark Runtime....")
           val params = ConfigUtils.toStringMap
           val conf = new SparkConf()
           params.filter(f =>
@@ -35,7 +35,8 @@ object SparkRuntime extends Logging {
             conf.setMaster(ConfigUtils.getStringValue(master))
           }
           sparkSession = SparkSession.builder().config(conf).getOrCreate()
-          logInfo("Spark Runtime created!!!")
+          sparkConfMap = sparkSession.conf.getAll
+          WowLog.logInfo("Spark Runtime created!!!")
         }
       }
     }
@@ -43,52 +44,43 @@ object SparkRuntime extends Logging {
   }
 
   def parseProcessAndSink(spark:SparkSession) = {
-    logInfo("spark parse process and sink start...")
+    WowLog.logInfo("spark parse process and sink start...")
     val sources = getSourceTable(spark)
-    logInfo("spark stream get all source table succeed!")
+    WowLog.logInfo("spark stream get all source table succeed!")
+    logInfo("All source data schema: ")
     sources.printSchema()
-    val dStreamWriter = sources.writeStream.foreachBatch {
+    val dStreamWriter = sources.writeStream.foreachBatch{
       (batchTable, batchId) =>
-        logInfo(s"start processing batch: $batchId")
+        WowLog.logInfo(s"start processing batch: $batchId")
+        val start = System.nanoTime()
         AlarmFlow.run(batchTable){
-          batchInfo =>
-            val allTable = batchInfo.flatMap {
-              case (source, topic) =>
-                val rule_rkey = AlarmRuleConf.getRkey(source, topic)
-                val rule_map = msgDeliver.getTableCache(rule_rkey)
-                val tables = rule_map.map{
-                  case (ruleConfId, ruleConf) =>
-                    val rule = AlarmRuleConf.formJson(ruleConf)
-                    SQLFilter.process(rule, batchTable)
-                }
-                tables.map {
-                  df =>
-                    import spark.implicits._
-                    df.as[AlarmRecord]
-                }
-            }
-            if (allTable.nonEmpty) {
-              val unionTable = allTable.reduce(_ union _)
-              scala.Some(unionTable)
-            } else {
-              None
-            }
+          // filterFunc
+          (table, rule) =>
+            val filterTable = SQLFilter.process(rule, table)
+            import spark.implicits._
+            filterTable.as[AlarmRecord]
         }{
+          // sinkFunc
           table =>
-           getSinks.map(_.process(table))
-        } {
-          table =>
-           AlarmAlert.push(table)
+            sinks.map(_.process(table))
+        }{
+          // alertFunc
+          (table, rule)=>
+           AlarmAlert.push(rule.item_id, rule.source, table)
         }
-        logInfo(s"bath $batchId processing is done.")
+        val end = System.nanoTime()
+        WowLog.logInfo(s"bath $batchId processing is done. Total time consuming: ${(end-start)/1000000} ms.")
     }
 
     streamingQuery = dStreamWriter
       .queryName(ConfigUtils.getStringValue(appName))
       .option("checkpointLocation", ConfigUtils.getStringValue(checkpoint))
-      .trigger(Trigger.ProcessingTime(ConfigUtils.getLongValue(trigger, 3000L))) // 默认3s
+      .trigger(Trigger.ProcessingTime(sparkConfMap.getOrElse(trigger,
+        ConfigUtils.getStringValue(trigger, "3000")).toLong)) // 默认3s
       .start()
   }
+
+  private lazy val sinks = getSinks
 
   def getSinks = {
     val sinks = ConfigUtils.getStringValue(SQLALARM_SINKS)
@@ -116,5 +108,51 @@ object SparkRuntime extends Logging {
     }
 
     sources.filter(_ != null).reduce(_ union _)
+  }
+}
+
+object RedisOperations {
+  import redis.clients.jedis.Jedis
+  import com.redislabs.provider.redis._
+  import com.redislabs.provider.redis.util.ConnectionUtils
+  lazy private val sc = SparkRuntime.getSparkSession.sparkContext
+
+  lazy private val redisEndpoint = RedisConfig.fromSparkConf(sc.getConf).initialHost
+
+  def IncorrectKeysOrKeyPatternMsg = "RedisOperations KeysOrKeyPattern should be String or Array[String]"
+
+  def getTableCache[T](keysOrKeyPattern: T):RDD[(String, String)] = {
+    keysOrKeyPattern match {
+      case keyPattern: String => sc.fromRedisHash(keyPattern.asInstanceOf[String])
+      case keys: Array[String] => sc.fromRedisHash(keys.asInstanceOf[Array[String]])
+      case _ => throw new SQLClubException(IncorrectKeysOrKeyPatternMsg)
+    }
+  }
+
+  def getTableCache(key: String, field:String)
+    (implicit conn:Jedis = redisEndpoint.connect()):String = {
+    ConnectionUtils.withConnection[String](conn) {
+      conn =>
+        conn.hget(key, field)
+    }
+  }
+
+
+  def addTableCache(key: String, field: String, value: String)
+    (implicit conn:Jedis = redisEndpoint.connect()): Long = {
+    ConnectionUtils.withConnection[Long](conn) {
+      conn =>
+        conn.hset(key, field, value)
+    }
+  }
+
+
+  def getListCache[T](keysOrKeyPattern:T):RDD[String] = {
+    keysOrKeyPattern match {
+      case keyPattern: String => sc.fromRedisList(keyPattern.asInstanceOf[String])
+      case keys: Array[String] => sc.fromRedisList(keys.asInstanceOf[Array[String]])
+      case _ => throw new SQLClubException(IncorrectKeysOrKeyPatternMsg)
+    }
+
   }
 }

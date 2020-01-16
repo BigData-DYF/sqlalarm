@@ -1,13 +1,14 @@
 package dt.sql.alarm.filter
 
 import dt.sql.alarm.conf.AlarmRuleConf
+import dt.sql.alarm.core.AlarmRecord
 import dt.sql.alarm.core.AlarmRecord._
-import dt.sql.alarm.log.Logging
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, to_json}
 import org.apache.spark.sql.{DataFrame, Dataset, Row}
-import dt.sql.alarm.core.Constants._
-import dt.sql.alarm.exception.SQLAlarmException
+import tech.sqlclub.common.exception.SQLClubException
+import tech.sqlclub.common.log.Logging
 import org.apache.spark.sql.types.{MapType, StringType}
+import dt.sql.alarm.core.Constants.SQL_FIELD_VALUE_NAME
 
 object SQLFilter extends Logging {
 
@@ -24,11 +25,12 @@ object SQLFilter extends Logging {
 
     val fields = structures.map{
       field =>
-        s"cast(get_json_object($value, '${field.xpath}') as ${field.`type`}) as ${field.name}"
+        s"cast(get_json_object($SQL_FIELD_VALUE_NAME, '${field.xpath}') as ${field.`type`}) as ${field.name}"
     }
 
     val table = df.filter( col(source) === source_.`type` and col(topic) === source_.topic ).selectExpr(fields :_*)
 
+    logInfo("SQLFilter SQL table schema: ")
     table.printSchema()
 
     table.createOrReplaceTempView(tableName)
@@ -51,7 +53,7 @@ object SQLFilter extends Logging {
     }
 
     val ck = checkSQLSyntax(sql)
-    if (!ck._1) throw new SQLAlarmException(s"input filter sql error! item_id: ${ruleConf.item_id}"+ ".sql:\n" + sql + " .\n\n" + ck._2)
+    if (!ck._1) throw new SQLClubException(s"input filter sql error! item_id: ${ruleConf.item_id}"+ ".sql:\n" + sql + " .\n\n" + ck._2)
 
     logInfo(s"input ruleConf:[source:${source_.`type`}, topic:$topic, tableName:$tableName] exec SQL: $sql")
 
@@ -63,27 +65,29 @@ object SQLFilter extends Logging {
 
     if(!b){
       logError("exec sql output cols must contains col list: " + requireCols)
-      throw new SQLAlarmException("exec sql output cols error! find cols: [" + sqlCols.mkString(",") + "],requires: [" + requireCols.mkString(",") + "]!")
+      throw new SQLClubException("exec sql output cols error! find cols: [" + sqlCols.mkString(",") + "],requires: [" + requireCols.mkString(",") + "]!")
     }
-
 
     val result = spark.sql(sql).selectExpr(requireCols :_* ).selectExpr("*" ,
       s"'${ruleConf.title}' as $title",
       s"'${ruleConf.platform}' as $platform",
-      s"'${ruleConf.item_id}' as $item_id"
-    )
+      s"'${ruleConf.item_id}' as $item_id",
+      s"'${source_.`type`}' as $source",
+      s"'${source_.topic}' as $topic"
+    ).withColumn(AlarmRecord.context, to_json(col(AlarmRecord.context)))
 
+    logInfo("SQLFilter SQL table filter result schema: ")
     result.printSchema()
 
-    val schemack = result.schema.map{
+    val schema = result.schema.map{
       structField =>
         val name = structField.name
         val dataType = if(structField.dataType.isInstanceOf[MapType]) MapType(StringType,StringType) else structField.dataType
-        requireSchema.contains(name) && requireSchema(name).equals(dataType)
-    }
+        (name, dataType)
+    }.toMap
 
-    if (schemack.filterNot(_ == true).nonEmpty){
-      throw new SQLAlarmException(s"the filter sql exec result schema error!item_id: ${ruleConf.item_id}, schema: ${result.schema}")
+    if ( !requireSchema.equals(schema) ){
+      throw new SQLClubException(s"the filter sql exec result schema error!item_id: ${ruleConf.item_id}, schema: ${result.schema}")
     }
 
     result

@@ -31,10 +31,11 @@ spark-submit --class dt.sql.alarm.SQLAlarmBoot \
         --conf "spark.kryoserializer.buffer=256k" \
         --conf "spark.kryoserializer.buffer.max=1024m" \
         --conf "spark.serializer=org.apache.spark.serializer.KryoSerializer" \
+        --conf "spark.redis.host=127.0.0.1" \
+        --conf "spark.redis.port=6379" \
+        --conf "spark.redis.db=4" \
         sa-core-1.0-SNAPSHOT.jar \
         -sqlalarm.name sqlalarm \
-        -redis.addresses "127.0.0.1:6379" \
-        -redis.database 4 \
         -sqlalarm.sources kafka \
         -sqlalarm.input.kafka.topic sqlalarm_event \
         -sqlalarm.input.kafka.subscribe.topic.pattern 1 \
@@ -48,6 +49,9 @@ spark-submit --class dt.sql.alarm.SQLAlarmBoot \
 2. Deploy the jar package in spark cluster.
 3. Add an alarm rule(put at redis): 
 ```bash
+# hset key uuid value
+# key: sqlalarm_rule:${sourceType}:${topic}
+
 HSET "sqlalarm_rule:kafka:sqlalarm_event" "uuid00000001" 
 {
     "item_id":"uuid00000001",
@@ -122,6 +126,18 @@ kafka-console-producer.sh --broker-list localhost:9092 --topic sqlalarm_event
 6. Supports alarm rules and policies to take effect dynamically without restarting the serve
 7. Supports adding data source topics dynamically(If your subscription mode is `subscribePattern`)
 8. Supports sending alarm records by specific different channels
+
+### Collectors
+SQLAlarm does't automatically generate metrics events, it only obtains metrics events from the message center and analyzes them.
+However, you can collect and report metrics events in another project called [metrics-exporter](https://github.com/bebee4java/metrics-exporter), 
+this makes up for this shortage well. 
+
+**In this way, a complete alarm process looks like:  
+[metrics-exporter](https://github.com/bebee4java/metrics-exporter) —> [sqlalarm](https://github.com/bebee4java/sqlalarm) —> alarm-pigeon**
+
+### Documentation
+The documentation of SQLAlarm is located on the issues page: [SQLAlarm issues](https://github.com/bebee4java/sqlalarm/issues).
+It contains a lot of information such as [configuration](https://github.com/bebee4java/sqlalarm/issues/2) and use tutorial etc. If you have any questions, please free to commit issues.
 
 ### Fork and Contribute
 This is an active open-source project. We are always open to people who want to use the system or contribute to it. Contact us if you are looking for implementation tasks that fit your skills.

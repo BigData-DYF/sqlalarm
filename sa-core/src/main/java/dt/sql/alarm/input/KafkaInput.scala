@@ -1,13 +1,13 @@
 package dt.sql.alarm.input
-import dt.sql.alarm.exception.SQLAlarmException
-import dt.sql.alarm.utils.ConfigUtils
 import org.apache.commons.lang3.StringUtils
 import org.apache.spark.sql.{Dataset, Row, SparkSession}
-import dt.sql.alarm.core.Constants._
 import Constants._
 import dt.sql.alarm.conf.KafkaConf
-import dt.sql.alarm.core.Source
-import dt.sql.alarm.log.Logging
+import dt.sql.alarm.core.{Source, WowLog}
+import tech.sqlclub.common.exception.SQLClubException
+import tech.sqlclub.common.log.Logging
+import tech.sqlclub.common.utils.ConfigUtils
+import dt.sql.alarm.core.Constants._
 
 /**
   * kafka消息输入
@@ -36,17 +36,17 @@ class KafkaInput extends BaseInput with Logging {
       StringUtils.isNoneBlank(group)
 
     if (!isValid) {
-      throw new SQLAlarmException(s"$KAFKA_TOPIC and $KAFKA_SERVERS are needed in kafka input conf and cant be empty!")
+      throw new SQLClubException(s"$KAFKA_TOPIC and $KAFKA_SERVERS are needed in kafka input conf and cant be empty!")
     }
 
     if (subscribeTypeIndex <0 || subscribeTypeIndex >2)
-      throw new SQLAlarmException(s"$KAFKA_SUBSCRIBE_TOPIC_PATTERN must between 0 and 2. Reference:$SubscribeType")
+      throw new SQLClubException(s"$KAFKA_SUBSCRIBE_TOPIC_PATTERN must between 0 and 2. Reference:$SubscribeType")
 
     Some(KafkaConf(SubscribeType(subscribeTypeIndex), topic, servers, group))
   }
 
   override protected[this] def process(session: SparkSession) = {
-    logInfo("Alarm kafka source process....")
+    WowLog.logInfo("Alarm kafka source process....")
     val conf = checkConfig
     if (conf.isDefined) {
       val kafkaConf = conf.get
@@ -61,14 +61,13 @@ class KafkaInput extends BaseInput with Logging {
         .options(options)
         .load()
 
-      dStream = lines.selectExpr(s"'${shortFormat}' as ${source}", s"${topic}", s"CAST(value AS STRING) as ${value}")
-      logInfo("Alarm kafka source process over!")
+      dStream = lines.selectExpr(s"'${shortFormat}' as ${SQL_FIELD_SOURCE_NAME}", s"${SQL_FIELD_TOPIC_NAME}", s"CAST(value AS STRING) as ${SQL_FIELD_VALUE_NAME}")
+      WowLog.logInfo("Alarm kafka source process over!")
     }
 
   }
 
-  def fullFormat: String = shortFormat
+  override def fullFormat: String = shortFormat
 
-  def shortFormat: String = "kafka"
-
+  override def shortFormat: String = "kafka"
 }
